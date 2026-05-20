@@ -1,9 +1,13 @@
--- 1. TẠO CẤU TRÚC BẢNG
+-- 1. TẠO DATABASE
+CREATE DATABASE IF NOT EXISTS social_network;
+USE social_network;
+
+-- 2. TẠO CẤU TRÚC BẢNG
 CREATE TABLE users (
     user_id INT PRIMARY KEY AUTO_INCREMENT,
     username VARCHAR(50) UNIQUE NOT NULL,
-    password VARCHAR(255) NOT NULL,
     email VARCHAR(100) UNIQUE NOT NULL,
+    password VARCHAR(255) NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -51,14 +55,21 @@ CREATE TABLE post_logs (
     deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 2. VIEW
+-- 3. VIEW
 CREATE OR REPLACE VIEW view_user_info AS
 SELECT user_id, username, email, created_at FROM users;
 
--- 3. STORED PROCEDURES & TRIGGERS
 DELIMITER //
 
--- Đăng ký user
+-- F01: Tìm kiếm người dùng (Hỗ trợ tìm gần đúng theo username)
+CREATE PROCEDURE sp_search_users(IN p_keyword VARCHAR(50))
+BEGIN
+    SELECT user_id, username, email, created_at 
+    FROM users 
+    WHERE username LIKE CONCAT('%', p_keyword, '%');
+END //
+
+-- F02: Đăng ký
 CREATE PROCEDURE sp_add_user(IN p_username VARCHAR(50), IN p_password VARCHAR(255), IN p_email VARCHAR(100))
 BEGIN
     IF EXISTS (SELECT 1 FROM users WHERE username = p_username OR email = p_email) THEN
@@ -68,55 +79,20 @@ BEGIN
     END IF;
 END //
 
--- Triggers tương tác
+-- F03: Triggers đếm (Chặn âm)
 CREATE TRIGGER tg_after_like_insert AFTER INSERT ON likes
-FOR EACH ROW UPDATE posts SET like_count = like_count + 1 WHERE post_id = NEW.post_id; //
+FOR EACH ROW UPDATE posts SET like_count = like_count + 1 WHERE post_id = NEW.post_id //
 
 CREATE TRIGGER tg_after_like_delete AFTER DELETE ON likes
-FOR EACH ROW UPDATE posts SET like_count = IF(like_count > 0, like_count - 1, 0) WHERE post_id = OLD.post_id; //
+FOR EACH ROW UPDATE posts SET like_count = IF(like_count > 0, like_count - 1, 0) WHERE post_id = OLD.post_id //
 
 CREATE TRIGGER tg_after_comment_insert AFTER INSERT ON comments
-FOR EACH ROW UPDATE posts SET comment_count = comment_count + 1 WHERE post_id = NEW.post_id; //
+FOR EACH ROW UPDATE posts SET comment_count = comment_count + 1 WHERE post_id = NEW.post_id //
 
 CREATE TRIGGER tg_after_comment_delete AFTER DELETE ON comments
-FOR EACH ROW UPDATE posts SET comment_count = IF(comment_count > 0, comment_count - 1, 0) WHERE post_id = OLD.post_id; //
+FOR EACH ROW UPDATE posts SET comment_count = IF(comment_count > 0, comment_count - 1, 0) WHERE post_id = OLD.post_id //
 
--- Trigger Audit Log
-CREATE TRIGGER tg_after_post_delete AFTER DELETE ON posts
-FOR EACH ROW INSERT INTO post_logs (post_id, post_content) VALUES (OLD.post_id, OLD.content); //
-
--- Trigger kiểm soát bạn bè
-CREATE TRIGGER tg_before_friend_insert BEFORE INSERT ON friends
-FOR EACH ROW
-BEGIN
-    IF NEW.user_id = NEW.friend_id THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Không thể tự kết bạn';
-    ELSEIF EXISTS (SELECT 1 FROM friends WHERE (user_id = NEW.user_id AND friend_id = NEW.friend_id) 
-                    OR (user_id = NEW.friend_id AND friend_id = NEW.user_id)) THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Đã tồn tại quan hệ bạn bè';
-    END IF;
-END //
-
--- Procedure xóa user toàn vẹn
-CREATE PROCEDURE sp_delete_user(IN p_user_id INT)
-BEGIN
-    DECLARE EXIT HANDLER FOR SQLEXCEPTION BEGIN ROLLBACK; END;
-    START TRANSACTION;
-        -- Xóa tương tác của bài viết do user tạo
-        DELETE FROM likes WHERE post_id IN (SELECT post_id FROM posts WHERE user_id = p_user_id);
-        DELETE FROM comments WHERE post_id IN (SELECT post_id FROM posts WHERE user_id = p_user_id);
-        -- Xóa tương tác cá nhân của user
-        DELETE FROM likes WHERE user_id = p_user_id;
-        DELETE FROM comments WHERE user_id = p_user_id;
-        -- Xóa quan hệ bạn bè
-        DELETE FROM friends WHERE user_id = p_user_id OR friend_id = p_user_id;
-        -- Xóa bài viết và user
-        DELETE FROM posts WHERE user_id = p_user_id;
-        DELETE FROM users WHERE user_id = p_user_id;
-    COMMIT;
-END //
-
--- Procedure thống kê
+-- F04: Thống kê (LEFT JOIN)
 CREATE PROCEDURE sp_user_activity_report()
 BEGIN
     SELECT u.user_id, u.username, 
@@ -129,11 +105,44 @@ BEGIN
     LEFT JOIN comments c ON u.user_id = c.user_id
     GROUP BY u.user_id;
 END //
-DELIMITER ;
 
--- 4. DỮ LIỆU MẪU (TEST)
-INSERT INTO users (username, password, email) VALUES ('alice', '123', 'alice@test.com'), ('bob', '123', 'bob@test.com'), ('charlie', '123', 'charlie@test.com');
-INSERT INTO posts (user_id, content) VALUES (1, 'Hello World'), (2, 'MySQL is fun'), (3, 'Learning database');
-INSERT INTO likes (user_id, post_id) VALUES (1, 2), (2, 3), (3, 1);
-INSERT INTO comments (user_id, post_id, content) VALUES (2, 1, 'Nice post!'), (3, 2, 'Agree!');
-INSERT INTO friends (user_id, friend_id) VALUES (1, 2);
+-- F05: Xóa tài khoản (Transaction an toàn)
+CREATE PROCEDURE sp_delete_user(IN p_user_id INT)
+BEGIN
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION 
+    BEGIN 
+        ROLLBACK; 
+        RESIGNAL; 
+    END;
+    
+    START TRANSACTION;
+        -- Xóa tương tác trên bài viết của user này (Bài của user xóa thì tương tác cũng xóa)
+        DELETE l FROM likes l JOIN posts p ON l.post_id = p.post_id WHERE p.user_id = p_user_id;
+        DELETE c FROM comments c JOIN posts p ON c.post_id = p.post_id WHERE p.user_id = p_user_id;
+        -- Xóa tương tác cá nhân (User đã thực hiện like/comment ở bài người khác)
+        DELETE FROM likes WHERE user_id = p_user_id;
+        DELETE FROM comments WHERE user_id = p_user_id;
+        DELETE FROM friends WHERE user_id = p_user_id OR friend_id = p_user_id;
+        -- Xóa bài viết và user
+        DELETE FROM posts WHERE user_id = p_user_id;
+        DELETE FROM users WHERE user_id = p_user_id;
+    COMMIT;
+END //
+
+-- F06: Kiểm soát kết bạn
+CREATE TRIGGER tg_before_friend_insert BEFORE INSERT ON friends
+FOR EACH ROW
+BEGIN
+    IF NEW.user_id = NEW.friend_id THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Không thể tự kết bạn với chính mình';
+    ELSEIF EXISTS (SELECT 1 FROM friends WHERE (user_id = NEW.user_id AND friend_id = NEW.friend_id) 
+                                         OR (user_id = NEW.friend_id AND friend_id = NEW.user_id)) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Quan hệ bạn bè đã tồn tại';
+    END IF;
+END //
+
+-- Audit Log
+CREATE TRIGGER tg_after_post_delete AFTER DELETE ON posts
+FOR EACH ROW INSERT INTO post_logs (post_id, post_content) VALUES (OLD.post_id, OLD.content) //
+
+DELIMITER ;
