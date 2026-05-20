@@ -1,441 +1,304 @@
-DROP DATABASE IF EXISTS mini_social_network;
-CREATE DATABASE mini_social_network;
-USE mini_social_network;
 
--- =========================
--- 1. TABLES
--- =========================
+-- PHẦN 1: KHỞI TẠO CƠ SỞ DỮ LIỆU & CẤU TRÚC BẢNG (SCHEMA)
 
+CREATE DATABASE IF NOT EXISTS social_network_db;
+USE social_network_db;
+
+-- Xóa các bảng cũ nếu tồn tại 
+DROP TABLE IF EXISTS post_logs;
+DROP TABLE IF EXISTS friends;
+DROP TABLE IF EXISTS likes;
+DROP TABLE IF EXISTS comments;
+DROP TABLE IF EXISTS posts;
+DROP TABLE IF EXISTS users;
+
+-- 1. Bảng Users (Bảng cha)
 CREATE TABLE users (
-    user_id INT PRIMARY KEY AUTO_INCREMENT,
-    username VARCHAR(50) UNIQUE NOT NULL,
+    user_id INT AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(50) NOT NULL UNIQUE,
     password VARCHAR(255) NOT NULL,
-    email VARCHAR(100) UNIQUE NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-) ENGINE = InnoDB;
+    email VARCHAR(100) NOT NULL UNIQUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 
+-- 2. Bảng Posts (Bảng con của users, bảng cha của likes/comments)
 CREATE TABLE posts (
-    post_id INT PRIMARY KEY AUTO_INCREMENT,
+    post_id INT AUTO_INCREMENT PRIMARY KEY,
     user_id INT NOT NULL,
     content TEXT NOT NULL,
     like_count INT DEFAULT 0,
     comment_count INT DEFAULT 0,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) -- Tuyệt đối không dùng ON DELETE CASCADE
+);
 
-    CONSTRAINT fk_posts_user
-        FOREIGN KEY (user_id) REFERENCES users(user_id),
+-- Cài đặt Full-Text Search trên cột content của bảng posts để tối ưu tìm kiếm
+ALTER TABLE posts ADD FULLTEXT INDEX idx_posts_content (content);
 
-    CONSTRAINT ck_like_count CHECK (like_count >= 0),
-    CONSTRAINT ck_comment_count CHECK (comment_count >= 0),
-
-    FULLTEXT INDEX idx_posts_content (content)
-) ENGINE = InnoDB;
-
+-- 3. Bảng Comments (Bảng con phụ thuộc posts và users)
 CREATE TABLE comments (
-    comment_id INT PRIMARY KEY AUTO_INCREMENT,
+    comment_id INT AUTO_INCREMENT PRIMARY KEY,
     post_id INT NOT NULL,
     user_id INT NOT NULL,
     content TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT fk_comments_post
-        FOREIGN KEY (post_id) REFERENCES posts(post_id)
-        ON DELETE CASCADE,
-
-    CONSTRAINT fk_comments_user
-        FOREIGN KEY (user_id) REFERENCES users(user_id)
-) ENGINE = InnoDB;
-
-CREATE TABLE likes (
-    like_id INT PRIMARY KEY AUTO_INCREMENT,
-    user_id INT NOT NULL,
-    post_id INT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT fk_likes_user
-        FOREIGN KEY (user_id) REFERENCES users(user_id),
-
-    CONSTRAINT fk_likes_post
-        FOREIGN KEY (post_id) REFERENCES posts(post_id)
-        ON DELETE CASCADE,
-
-    CONSTRAINT uq_user_post UNIQUE (user_id, post_id)
-) ENGINE = InnoDB;
-
-CREATE TABLE friends (
-    friendship_id INT PRIMARY KEY AUTO_INCREMENT,
-    user_id INT NOT NULL,
-    friend_id INT NOT NULL,
-    status VARCHAR(20) DEFAULT 'pending',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT fk_friends_user
-        FOREIGN KEY (user_id) REFERENCES users(user_id),
-
-    CONSTRAINT fk_friends_friend
-        FOREIGN KEY (friend_id) REFERENCES users(user_id),
-
-    CONSTRAINT ck_friend_status CHECK (status IN ('pending', 'accepted')),
-    CONSTRAINT ck_not_self_friend CHECK (user_id <> friend_id)
-) ENGINE = InnoDB;
-
--- Chặn A kết bạn B và B kết bạn A bị trùng
-CREATE UNIQUE INDEX uq_friend_pair
-ON friends (
-    (LEAST(user_id, friend_id)),
-    (GREATEST(user_id, friend_id))
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (post_id) REFERENCES posts(post_id),
+    FOREIGN KEY (user_id) REFERENCES users(user_id)
 );
 
+-- 4. Bảng Likes (Bảng con phụ thuộc posts và users)
+CREATE TABLE likes (
+    like_id INT AUTO_INCREMENT PRIMARY KEY,
+    post_id INT NOT NULL,
+    user_id INT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (post_id) REFERENCES posts(post_id),
+    FOREIGN KEY (user_id) REFERENCES users(user_id),
+    -- Ràng buộc: Mỗi người chỉ được like một bài viết tối đa một lần
+    CONSTRAINT unique_user_post_like UNIQUE (user_id, post_id)
+);
+
+-- 5. Bảng Friends (Bảng quản lý quan hệ bạn bè giữa các users)
+CREATE TABLE friends (
+    friendship_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    friend_id INT NOT NULL,
+    status VARCHAR(20) DEFAULT 'pending', -- Trạng thái: pending, accepted
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(user_id),
+    FOREIGN KEY (friend_id) REFERENCES users(user_id)
+);
+
+-- 6. Bảng Post Logs (Bảng lưu vết phục vụ yêu cầu mở nâng cao)
 CREATE TABLE post_logs (
-    log_id INT PRIMARY KEY AUTO_INCREMENT,
-    post_id INT,
-    user_id INT,
-    content TEXT,
-    action_type VARCHAR(50),
-    action_date DATETIME DEFAULT CURRENT_TIMESTAMP
-) ENGINE = InnoDB;
+    log_id INT AUTO_INCREMENT PRIMARY KEY,
+    post_id INT NOT NULL,
+    post_content TEXT NOT NULL,
+    deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 
 
--- =========================
--- 2. TRIGGERS
--- =========================
-
-DELIMITER $$
-
-CREATE TRIGGER trg_after_like_insert
-AFTER INSERT ON likes
-FOR EACH ROW
-BEGIN
-    UPDATE posts
-    SET like_count = like_count + 1
-    WHERE post_id = NEW.post_id;
-END $$
-
-CREATE TRIGGER trg_after_like_delete
-AFTER DELETE ON likes
-FOR EACH ROW
-BEGIN
-    UPDATE posts
-    SET like_count = like_count - 1
-    WHERE post_id = OLD.post_id;
-END $$
-
-CREATE TRIGGER trg_after_comment_insert
-AFTER INSERT ON comments
-FOR EACH ROW
-BEGIN
-    UPDATE posts
-    SET comment_count = comment_count + 1
-    WHERE post_id = NEW.post_id;
-END $$
-
-CREATE TRIGGER trg_after_comment_delete
-AFTER DELETE ON comments
-FOR EACH ROW
-BEGIN
-    UPDATE posts
-    SET comment_count = comment_count - 1
-    WHERE post_id = OLD.post_id;
-END $$
-
-CREATE TRIGGER trg_before_post_delete
-BEFORE DELETE ON posts
-FOR EACH ROW
-BEGIN
-    INSERT INTO post_logs(post_id, user_id, content, action_type)
-    VALUES (OLD.post_id, OLD.user_id, OLD.content, 'DELETE');
-END $$
-
-DELIMITER ;
+-- -------------------------------------------------------------------------
+-- PHẦN 2: CHỨC NĂNG 1 - KHUNG NHÌN HỒ SƠ (VIEW)
+-- -------------------------------------------------------------------------
+-- Mục đích: Đổ dữ liệu an toàn, ẩn cột password để tránh rò rỉ thông tin
+CREATE OR REPLACE VIEW view_user_info AS
+SELECT user_id, username, email, created_at
+FROM users;
 
 
--- =========================
--- 3. STORED PROCEDURES
--- =========================
+
+-- PHẦN 3: ĐỊNH NGHĨA CÁC THỦ TỤC & TRIGGER (STORED PROCEDURES & TRIGGERS)
 
 DELIMITER $$
 
--- F01: Đăng ký user
-CREATE PROCEDURE sp_register_user(
+-- CHỨC NĂNG 2: Thủ tục đăng ký tài khoản (sp_add_user)
+CREATE PROCEDURE sp_add_user(
     IN p_username VARCHAR(50),
     IN p_password VARCHAR(255),
     IN p_email VARCHAR(100)
 )
 BEGIN
-    INSERT INTO users(username, password, email)
-    VALUES (p_username, SHA2(p_password, 256), p_email);
-END $$
+    -- Kiểm tra trùng lặp email và username trước khi thêm mới
+    IF EXISTS (SELECT 1 FROM users WHERE email = p_email) THEN
+        SIGNAL SQLSTATE '45000' 
+        SET MESSAGE_TEXT = 'Lỗi nghiệp vụ: Email này đã được đăng ký hệ thống.';
+    ELSEIF EXISTS (SELECT 1 FROM users WHERE username = p_username) THEN
+        SIGNAL SQLSTATE '45000' 
+        SET MESSAGE_TEXT = 'Lỗi nghiệp vụ: Tên tài khoản (username) đã tồn tại.';
+    ELSE
+        -- Hợp lệ tiến hành INSERT dữ liệu mới
+        INSERT INTO users (username, password, email) 
+        VALUES (p_username, p_password, p_email);
+    END IF;
+END$$
 
 
--- F02: Đăng bài viết
-CREATE PROCEDURE sp_create_post(
-    IN p_user_id INT,
-    IN p_content TEXT
-)
+-- CHỨC NĂNG 3: Tự động tăng số lượt like khi chèn bản ghi vào bảng likes
+CREATE TRIGGER tg_after_like_insert
+AFTER INSERT ON likes
+FOR EACH ROW
 BEGIN
-    INSERT INTO posts(user_id, content)
-    VALUES (p_user_id, p_content);
-END $$
+    UPDATE posts 
+    SET like_count = like_count + 1 
+    WHERE post_id = NEW.post_id;
+END$$
 
-
--- F03: Like bài viết
-CREATE PROCEDURE sp_like_post(
-    IN p_user_id INT,
-    IN p_post_id INT
-)
+-- CHỨC NĂNG 3: Tự động giảm số lượt like khi xóa bản ghi (Chặn không âm dưới 0)
+CREATE TRIGGER tg_after_like_delete
+AFTER DELETE ON likes
+FOR EACH ROW
 BEGIN
-    INSERT INTO likes(user_id, post_id)
-    VALUES (p_user_id, p_post_id);
-END $$
+    UPDATE posts 
+    SET like_count = IF(like_count > 0, like_count - 1, 0) 
+    WHERE post_id = OLD.post_id;
+END$$
 
-
--- F03: Hủy like bài viết
-CREATE PROCEDURE sp_unlike_post(
-    IN p_user_id INT,
-    IN p_post_id INT
-)
+-- CHỨC NĂNG 3: Tự động tăng số lượt bình luận khi chèn vào bảng comments
+CREATE TRIGGER tg_after_comment_insert
+AFTER INSERT ON comments
+FOR EACH ROW
 BEGIN
-    DELETE FROM likes
-    WHERE user_id = p_user_id
-      AND post_id = p_post_id;
-END $$
+    UPDATE posts 
+    SET comment_count = comment_count + 1 
+    WHERE post_id = NEW.post_id;
+END$$
 
-
--- F04: Gửi lời mời kết bạn
-CREATE PROCEDURE sp_send_friend_request(
-    IN p_user_id INT,
-    IN p_friend_id INT
-)
+-- CHỨC NĂNG 3: Tự động giảm số lượt bình luận khi xóa bản ghi (Chặn không âm dưới 0)
+CREATE TRIGGER tg_after_comment_delete
+AFTER DELETE ON comments
+FOR EACH ROW
 BEGIN
-    INSERT INTO friends(user_id, friend_id, status)
-    VALUES (p_user_id, p_friend_id, 'pending');
-END $$
+    UPDATE posts 
+    SET comment_count = IF(comment_count > 0, comment_count - 1, 0) 
+    WHERE post_id = OLD.post_id;
+END$$
 
 
--- F05: Chấp nhận lời mời kết bạn
-CREATE PROCEDURE sp_accept_friend_request(
-    IN p_friendship_id INT
-)
-BEGIN
-    UPDATE friends
-    SET status = 'accepted'
-    WHERE friendship_id = p_friendship_id;
-END $$
-
-
--- F05: Hủy kết bạn / hủy lời mời
-CREATE PROCEDURE sp_remove_friend(
-    IN p_user_id INT,
-    IN p_friend_id INT
-)
-BEGIN
-    DELETE FROM friends
-    WHERE (user_id = p_user_id AND friend_id = p_friend_id)
-       OR (user_id = p_friend_id AND friend_id = p_user_id);
-END $$
-
-
--- F08: Báo cáo hoạt động của user
-CREATE PROCEDURE sp_user_activity_report(
-    IN p_user_id INT
-)
+-- CHỨC NĂNG 4: Thủ tục Thống kê hoạt động của từng User (sp_user_activity_report)
+CREATE PROCEDURE sp_user_activity_report()
 BEGIN
     SELECT 
         u.user_id,
         u.username,
         COUNT(DISTINCT p.post_id) AS total_posts,
-        COALESCE(SUM(p.like_count), 0) AS total_likes,
-        COALESCE(SUM(p.comment_count), 0) AS total_comments
+        COUNT(DISTINCT l.like_id) AS total_likes_given,
+        COUNT(DISTINCT c.comment_id) AS total_comments_written
     FROM users u
     LEFT JOIN posts p ON u.user_id = p.user_id
-    WHERE u.user_id = p_user_id
+    LEFT JOIN likes l ON u.user_id = l.user_id
+    LEFT JOIN comments c ON u.user_id = c.user_id
     GROUP BY u.user_id, u.username;
-END $$
+END$$
 
 
--- F09: Gợi ý kết bạn - bạn của bạn
-CREATE PROCEDURE sp_suggest_friends(
-    IN p_user_id INT
-)
+-- CHỨC NĂNG 5: Thủ tục xóa tài khoản toàn vẹn dữ liệu sử dụng Transaction (sp_delete_user)
+CREATE PROCEDURE sp_delete_user(IN p_user_id INT)
 BEGIN
-    WITH my_friends AS (
-        SELECT 
-            CASE 
-                WHEN user_id = p_user_id THEN friend_id
-                ELSE user_id
-            END AS friend_id
-        FROM friends
-        WHERE status = 'accepted'
-          AND (user_id = p_user_id OR friend_id = p_user_id)
-    ),
-    friends_of_friends AS (
-        SELECT 
-            CASE 
-                WHEN f.user_id = mf.friend_id THEN f.friend_id
-                ELSE f.user_id
-            END AS suggested_user_id
-        FROM friends f
-        JOIN my_friends mf
-            ON f.user_id = mf.friend_id OR f.friend_id = mf.friend_id
-        WHERE f.status = 'accepted'
-    )
-    SELECT DISTINCT 
-        u.user_id,
-        u.username,
-        u.email
-    FROM friends_of_friends fof
-    JOIN users u ON u.user_id = fof.suggested_user_id
-    WHERE fof.suggested_user_id <> p_user_id
-      AND fof.suggested_user_id NOT IN (
-          SELECT friend_id FROM my_friends
-      );
-END $$
-
-
--- F10: Xóa bài viết của chính mình
-CREATE PROCEDURE sp_delete_own_post(
-    IN p_user_id INT,
-    IN p_post_id INT
-)
-BEGIN
-    START TRANSACTION;
-
-    DELETE FROM posts
-    WHERE post_id = p_post_id
-      AND user_id = p_user_id;
-
-    COMMIT;
-END $$
-
-
--- F11: Xóa tài khoản user an toàn bằng transaction
-CREATE PROCEDURE sp_delete_user_account(
-    IN p_user_id INT
-)
-BEGIN
+    -- Khai báo khối xử lý sự cố (Exit Handler) để Rollback khi có bất kì câu lệnh nào lỗi
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
         ROLLBACK;
-        RESIGNAL;
+        SIGNAL SQLSTATE '45000' 
+        SET MESSAGE_TEXT = 'Giao dịch thất bại: Xung đột dữ liệu. Đã thực hiện ROLLBACK hệ thống.';
     END;
 
+    -- Bắt đầu phiên giao dịch (Áp dụng nguyên tắc All-or-Nothing)
     START TRANSACTION;
+        
+        -- Bước 1: Xóa toàn bộ các lượt tương tác trong các bài viết thuộc về User sắp xóa
+        DELETE FROM likes WHERE post_id IN (SELECT post_id FROM posts WHERE user_id = p_user_id);
+        DELETE FROM comments WHERE post_id IN (SELECT post_id FROM posts WHERE user_id = p_user_id);
 
-    DELETE FROM likes
-    WHERE user_id = p_user_id;
+        -- Bước 2: Xóa toàn bộ các tương tác do CHÍNH người dùng này thực hiện trên bài viết người khác
+        DELETE FROM likes WHERE user_id = p_user_id;
+        DELETE FROM comments WHERE user_id = p_user_id;
 
-    DELETE FROM comments
-    WHERE user_id = p_user_id;
+        -- Bước 3: Xóa các mối quan hệ bạn bè của người dùng (Xử lý cả hai chiều)
+        DELETE FROM friends WHERE user_id = p_user_id OR friend_id = p_user_id;
 
-    DELETE FROM friends
-    WHERE user_id = p_user_id
-       OR friend_id = p_user_id;
+        -- Bước 4: Xóa các bài đăng thuộc quyền sở hữu của người dùng này
+        DELETE FROM posts WHERE user_id = p_user_id;
 
-    DELETE FROM posts
-    WHERE user_id = p_user_id;
+        -- Bước 5: Tiến hành xóa bản ghi gốc tại bảng cha (users)
+        DELETE FROM users WHERE user_id = p_user_id;
 
-    DELETE FROM users
-    WHERE user_id = p_user_id;
-
+    -- Lưu lại mọi thay đổi vào cơ sở dữ liệu nếu chuỗi xử lý trên hoàn tất thành công
     COMMIT;
-END $$
+END$$
+
+
+-- CHỨC NĂNG 6: Trigger kiểm soát logic kết bạn trước khi INSERT dữ liệu (tg_before_friend_insert)
+CREATE TRIGGER tg_before_friend_insert
+BEFORE INSERT ON friends
+FOR EACH ROW
+BEGIN
+    -- Kiểm tra lỗi số 1: Tự gửi kết bạn cho chính mình
+    IF NEW.user_id = NEW.friend_id THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Lỗi nghiệp vụ: Bạn không thể tự kết bạn với chính bản thân mình.';
+    
+    -- Kiểm tra lỗi số 2: Trùng lặp dữ liệu (Cặp quan hệ này đã tồn tại sẵn trong hệ thống)
+    ELSEIF EXISTS (SELECT 1 FROM friends WHERE user_id = NEW.user_id AND friend_id = NEW.friend_id) THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Lỗi nghiệp vụ: Lời mời hoặc mối quan hệ bạn bè này đã tồn tại trước đó.';
+        
+    -- Kiểm tra lỗi số 3: Lời mời đảo chiều (Đối phương đã gửi lời mời cho bạn từ trước, hệ thống đang chờ duyệt)
+    ELSEIF EXISTS (SELECT 1 FROM friends WHERE user_id = NEW.friend_id AND friend_id = NEW.user_id) THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Lỗi nghiệp vụ: Người dùng này đã gửi lời mời cho bạn rồi. Vui lòng chấp nhận thay vì tạo mới.';
+    END IF;
+END$$
+
+
+-- YÊU CẦU MỞ RỘNG (NÂNG CAO): Nhật ký lưu vết khi xóa bài viết (tg_after_post_delete)
+CREATE TRIGGER tg_after_post_delete
+AFTER DELETE ON posts
+FOR EACH ROW
+BEGIN
+    -- Sao chép tự động thông tin bài viết bị xóa vĩnh viễn vào bảng lưu vết post_logs
+    INSERT INTO post_logs (post_id, post_content, deleted_at)
+    VALUES (OLD.post_id, OLD.content, NOW());
+END$$
 
 DELIMITER ;
 
 
--- =========================
--- 4. VIEWS
--- =========================
+-- -------------------------------------------------------------------------
+-- PHẦN 4: NẠP DỮ LIỆU MẪU (MOCK DATA) & KỊCH BẢN KIỂM THỬ HỆ THỐNG
+-- -------------------------------------------------------------------------
 
-CREATE VIEW v_user_profile AS
-SELECT 
-    u.user_id,
-    u.username,
-    u.email,
-    u.created_at,
-    COUNT(DISTINCT p.post_id) AS total_posts,
-    COALESCE(SUM(p.like_count), 0) AS total_likes,
-    COALESCE(SUM(p.comment_count), 0) AS total_comments
-FROM users u
-LEFT JOIN posts p ON u.user_id = p.user_id
-GROUP BY u.user_id, u.username, u.email, u.created_at;
+-- 1. Nạp người dùng bằng Stored Procedure vừa tạo (Kiểm tra chức năng 2)
+CALL sp_add_user('nguyen_van_a', 'matkhau123', 'anv@gmail.com');
+CALL sp_add_user('tran_thi_b', 'matkhau456', 'btt@gmail.com');
+CALL sp_add_user('le_van_c', 'matkhau789', 'clv@gmail.com');
 
+-- [Kiểm thử Chức năng 1]: Kiểm tra View xem thông tin có bị lộ mật khẩu không
+SELECT * FROM view_user_info;
 
-CREATE VIEW v_post_detail AS
-SELECT 
-    p.post_id,
-    p.content,
-    p.like_count,
-    p.comment_count,
-    p.created_at,
-    u.user_id,
-    u.username
-FROM posts p
-JOIN users u ON p.user_id = u.user_id;
+-- [Kiểm thử Chức năng 2 bổ sung]: Thử đăng ký trùng Email xem hệ thống có báo lỗi chặn lại không
+-- CALL sp_add_user('user_trung_lap', 'matkhauXYZ', 'anv@gmail.com');
 
+-- 2. Thêm dữ liệu bài đăng ( posts ) mẫu để chuẩn bị test trigger đếm
+-- (Giả định các ID tự tăng sinh ra lần lượt là 1, 2, 3)
+INSERT INTO posts (user_id, content) VALUES 
+(1, 'Hôm nay trời đẹp quá, cùng đi học cơ sở dữ liệu nào các bạn ơi!'),
+(2, 'Dự án Mini Project MySQL này cấu hình trigger viết khá phức tạp.'),
+(3, 'Tìm kiếm bài viết bằng công nghệ Full-text Search trên MySQL rất tối ưu.');
 
--- =========================
--- 5. SAMPLE DATA
--- =========================
+-- 3. Thực hiện hành vi Tương tác (Like & Bình luận) mẫu
+INSERT INTO likes (user_id, post_id) VALUES (2, 1); -- User 2 like bài 1
+INSERT INTO likes (user_id, post_id) VALUES (3, 1); -- User 3 like bài 1
+INSERT INTO comments (post_id, user_id, content) VALUES (1, 2, 'Bài viết rất hay và ý nghĩa!'); -- User 2 comment bài 1
 
-CALL sp_register_user('tung', '123456', 'tung@gmail.com');
-CALL sp_register_user('nam', '123456', 'nam@gmail.com');
-CALL sp_register_user('linh', '123456', 'linh@gmail.com');
-CALL sp_register_user('hoa', '123456', 'hoa@gmail.com');
+-- [Kiểm thử Chức năng 3]: Kiểm tra xem bộ đếm tương tác tự cộng (+1) lên nhờ Trigger chưa
+SELECT post_id, content, like_count, comment_count FROM posts;
 
-CALL sp_create_post(1, 'Hello mọi người, đây là bài viết đầu tiên.');
-CALL sp_create_post(1, 'Hôm nay học MySQL Trigger và Transaction.');
-CALL sp_create_post(2, 'Database rất quan trọng trong backend.');
-CALL sp_create_post(3, 'Ai học SQL không?');
+-- Thử hủy lượt thích (Xóa bản ghi bảng con) để kiểm tra trigger giảm bộ đếm (-1)
+DELETE FROM likes WHERE user_id = 3 AND post_id = 1;
+SELECT post_id, content, like_count FROM posts WHERE post_id = 1; -- Like_count từ 2 giảm xuống 1
 
-CALL sp_like_post(2, 1);
-CALL sp_like_post(3, 1);
-CALL sp_like_post(4, 1);
-CALL sp_like_post(1, 3);
+-- [Kiểm thử Ràng buộc UNIQUE của bảng Likes]: Thử like trùng lặp lại (Sẽ báo lỗi từ MySQL)
+-- INSERT INTO likes (user_id, post_id) VALUES (2, 1);
 
-INSERT INTO comments(post_id, user_id, content)
-VALUES
-(1, 2, 'Bài viết hay quá!'),
-(1, 3, 'Tui cũng đang học SQL.'),
-(3, 1, 'Chuẩn luôn bạn.');
+-- 4. Thử nghiệm kết bạn (Kiểm thử Chức năng 6)
+INSERT INTO friends (user_id, friend_id, status) VALUES (1, 2, 'pending'); -- User 1 gửi kết bạn User 2 thành công
 
-CALL sp_send_friend_request(1, 2);
-CALL sp_send_friend_request(1, 3);
-CALL sp_send_friend_request(2, 4);
+-- [Kiểm thử Chức năng 6 - Lỗi 1]: Tự kết bạn với chính mình (Sẽ vấp lỗi báo về từ Trigger)
+-- INSERT INTO friends (user_id, friend_id) VALUES (1, 1);
 
-CALL sp_accept_friend_request(1);
-CALL sp_accept_friend_request(2);
-CALL sp_accept_friend_request(3);
+--  Lời mời đảo chiều (User 2 gửi ngược cho User 1 trong khi đang pending)
+-- INSERT INTO friends (user_id, friend_id) VALUES (2, 1);
 
+-- 5. Chạy báo cáo thống kê hoạt động (Kiểm thử Chức năng 4)
+CALL sp_user_activity_report();
 
--- =========================
--- 6. TEST QUERIES
--- =========================
+-- 6. Kiểm thử quy trình xóa sạch dữ liệu liên kết bằng Transaction (Kiểm thử Chức năng 5 & Mở rộng)
+-- Tiến hành xóa vĩnh viễn tài khoản của User số 3 (le_van_c)
+CALL sp_delete_user(3);
 
+-- Kiểm tra xem tài khoản User 3 đã biến mất hoàn toàn khỏi bảng Users chưa
 SELECT * FROM users;
-SELECT * FROM posts;
-SELECT * FROM likes;
-SELECT * FROM comments;
-SELECT * FROM friends;
-SELECT * FROM v_user_profile;
-SELECT * FROM v_post_detail;
 
--- Tìm kiếm bài viết theo từ khóa
-SELECT *
-FROM posts
-WHERE MATCH(content) AGAINST('SQL' IN NATURAL LANGUAGE MODE);
-
--- Báo cáo user
-CALL sp_user_activity_report(1);
-
--- Gợi ý kết bạn
-CALL sp_suggest_friends(1);
-
--- Test hủy like
-CALL sp_unlike_post(2, 1);
-
--- Test xóa bài viết
-CALL sp_delete_own_post(1, 2);
-
--- Xem log xóa bài viết
+-- [Kiểm thử Yêu cầu Mở rộng]: Kiểm tra bảng Nhật ký `post_logs` xem bài đăng số 3 của User 3 có được sao lưu tự động chưa
 SELECT * FROM post_logs;
